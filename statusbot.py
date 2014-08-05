@@ -3,6 +3,7 @@
 import irc.bot
 import json
 import socket
+import telnetlib
 
 class Pugbot(irc.bot.SingleServerIRCBot):
     def __init__(self, config):
@@ -18,6 +19,13 @@ class Pugbot(irc.bot.SingleServerIRCBot):
             addr = parts[-1]
             name = " ".join(parts[:-1])
             self.servers[name] = addr
+
+        self.ts3servers = []
+        for line in open("ts3.txt", "r").readlines():
+            parts = line.split(" ")
+            addr = parts[-1]
+            name = " ".join(parts[:-1])
+            self.ts3servers.append(addr)
 
         # Adds a Latin-1 fallback when UTF-8 decoding doesn't work
         irc.client.ServerConnection.buffer_class = irc.buffer.LenientDecodingLineBuffer
@@ -178,6 +186,22 @@ class Pugbot(irc.bot.SingleServerIRCBot):
         else:
             for s in self.servers:
                 self.parseStatus(s, False)
+
+    _QUERYPORT = 10011
+    def cmd_ts3(self, issuedBy, data):
+        """.ts3 - shows ts3 information"""
+        server = self.ts3servers[0].split(":")
+        host = server[0]
+        port = server[1]
+        teln = telnetlib.Telnet(host = host, port = self._QUERYPORT)
+        print(teln.read_very_eager())
+        teln.write(b"use port=9987\n")
+        print(teln.read_until("errornid="))
+        teln.write(b"clientlist\n")
+        r = teln.read_until("error id=")
+        print(r)
+
+        
 
 def main():
     try:
