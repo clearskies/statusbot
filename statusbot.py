@@ -14,22 +14,22 @@ def genRandomString(length):
 
 class Pugbot(irc.bot.SingleServerIRCBot):
     def __init__(self, config):
-        irc_config = self.config["irc"]
-        servers_config = self.config["servers"]
-
-        super(Pugbot, self).__init__(
-            [(["server"], irc_config["port"])],
-            irc_config["nick"], irc_config["nick"])
-        self.channel = irc_config["channel"]
+        super(Pugbot, self).__init__([(config["server"], config["port"])], config["nick"], config["nick"])
+        self.channel = config["channel"]
         self.target = self.channel
-        self.cmdPrefixes = irc_config["prefixes"]
-        self.owners = irc_config["owners"]
-        self.rconowners = irc_config["rconowners"]
-        self.rconpasswd = irc_config["rconpasswd"]
+        self.cmdPrefixes = config["prefixes"]
+        self.owners = config["owners"]
+        self.rconowners = config["rconowners"]
+        self.rconpasswd = config["rconpasswd"]
         self.clan = config["clantag"]
         self.loggedin = self.rconowners
 
-        self.servers = servers_config
+        self.servers = {}
+        for line in open("servers.txt", "r").readlines():
+            parts = line.strip().split(" ")
+            addr = parts[-1]
+            name = " ".join(parts[:-1])
+            self.servers[name] = addr
 
         self.ts3servers = {}
         for line in open("ts3.txt", "r").readlines():
@@ -61,22 +61,23 @@ class Pugbot(irc.bot.SingleServerIRCBot):
 
         self.password = genRandomString(5)
         self._msg_owners(self.password)
+        print(self.password)
 
     def _msg_owners(self, message):
         for owner in self.owners:
             self.pm(owner, message)
 
     def on_privmsg(self, conn, ev):
-        self.parseChat(ev)
+        self.parseChat(ev, True)
 
     def on_pubmsg(self, conn, ev):
         self.parseChat(ev)
         if self.password in ev.arguments[0]:
             self.new_password()
 
-    def parseChat(self, ev):
+    def parseChat(self, ev, priv = False):
         if (ev.arguments[0][0] in self.cmdPrefixes):
-            self.executeCommand(ev)
+            self.executeCommand(ev, priv)
 
     def _on_nick(self, conn, ev):
         old = ev.source.nick
@@ -90,26 +91,36 @@ class Pugbot(irc.bot.SingleServerIRCBot):
         self.password = genRandomString(5)
         self._msg_owners(self.password)
 
-    def executeCommand(self, ev):
-        issuedBy = ev.source.nick
+    def executeCommand(self, ev, priv):
+        self.issuedBy = ev.source.nick
         text = ev.arguments[0][1:].split(" ")
         command = text[0].lower()
         data = " ".join(text[1:])
+
+        if priv:
+            self.target = self.issuedBy
+        else:
+            self.target = self.channel
 
         found = False
 
         try:
             commandFunc = getattr(self, "cmd_" + command)
-            commandFunc(issuedBy, data)
+            commandFunc(self.issuedBy, data)
             found = True
         except AttributeError:
-            if data[:5] == self.password or issuedBy in self.loggedin:
-                try:
-                    commandFunc = getattr(self, "pw_cmd_" + command)
-                    commandFunc(issuedBy, data)
-                    found = True
-                except AttributeError:
-                    pass
+            try:
+                commandFunc = getattr(self, "a_cmd_" + command)
+                found = True
+                commandFunc(self.issuedBy, data)
+            except AttributeError:
+                if data[:5] == self.password or self.issuedBy in self.loggedin:
+                    try:
+                        commandFunc = getattr(self, "pw_cmd_" + command)
+                        found = True
+                        commandFunc(self.issuedBy, data)
+                    except AttributeError:
+                        pass
         
         if not found:
             self.reply("Command not found: " + command)
@@ -122,10 +133,10 @@ class Pugbot(irc.bot.SingleServerIRCBot):
         port = int(parts[1])
 
         try:
-            sock.settimeout(10)
+            sock.settimeout(3)
             sock.connect((host, port))
             sock.send(b"\xFF\xFF\xFF\xFF" + data.encode())
-        except socket.Timeouterror:
+        except socket.timeout:
             sock.close()
             return
 
@@ -178,16 +189,23 @@ class Pugbot(irc.bot.SingleServerIRCBot):
         if server is None:
             return
 
+        longLen = len(max(self.servers, key = len))
+        
         try:
             r = self.sockSend(server, "getstatus")
-        except socket.Timeouterror:
+        except socket.timeout:
+            if playersCmd:
+                self.reply("{} server i".format(name))
+            elif not serverCmd:
+                self.reply("(N/A)  \x02{}\x02 \x034SERVER IS DOWN".format(\
+                    (name + ":").ljust(longLen + 2)))
             return
 
         sparts = r.split("\n")
 
         players = [p for p in sparts[2:] if p]
         nplayers = [re.sub("\^[0-9-]", "", player) for player in players]
-        clanmems = " ".join(players).count(self.clan)
+        clanmems = len([x for x in players if self.clan in x])
 
         rawvars = sparts[1].split("\\")[1:]
         svars = {rawvars[i]:rawvars[i+1] for i in range(0, len(rawvars), 2)}
@@ -199,14 +217,35 @@ class Pugbot(irc.bot.SingleServerIRCBot):
                 self.reply("\x02Players on {} ({}/{}):\x02  ".format(name, len(players), svars["sv_maxclients"]) + 
                            ", ".join(p.split(" ")[2][1:-1] for p in nplayers))
         elif serverCmd:
-            self.rcon.send("{}".format(" ".join(data[1:])))
-            self.reply("\x02{}\x02 command sent to \x02{}\x02".format(" ".join(data[1:]), name))
+            sendcmd = self.rcon.send("{}".format(" ".join(data[1:])))
+            infos = sendcmd.split("\n")
+            infos = [i for i in infos if i]
+            if "Bad rconpassword." in infos:
+                self.reply("Bad rconpassword")
+            elif len(infos) == 2:
+                ninfo = [re.sub("\^[0-9-]", "", info) for info in infos]
+                self.reply("".join(ninfo[1]))
+            elif data[1] == "dumpuser":
+                for i in range(3, len(infos)):
+                    self.pm(self.issuedBy, "{}".format(infos[i]))
+            else:
+                sendcmd
+                self.reply("\x02{}\x02 command sent to \x02{}\x02".format(" ".join(data[1:]), name))
         else:
             gamemode = self._GAMEMODES[int(svars["g_gametype"])]
             if clanmems:
-                self.reply("\x02{}\x02 ({}):    {}/{} ({} {})    {}".format(name, gamemode, len(players), svars["sv_maxclients"], clanmems, self.clan, svars["mapname"]))
+                self.reply("{}\x02{}\x02 {}{} {}".format(\
+                    ("(" + gamemode + ")").ljust(7),
+                    (name + ":").ljust(longLen + 2),
+                    (str(len(players)) + "/" + svars["sv_maxclients"]).ljust(8), 
+                    ("(" + str(clanmems) + " " + self.clan + ")").ljust(12),
+                    svars["mapname"]))
             else:
-                self.reply("\x02{}\x02 ({}):    {}/{}    {}".format(name, gamemode, len(players), svars["sv_maxclients"], svars["mapname"]))
+                self.reply("{}\x02{}\x02 {} {}".format(\
+                    ("(" + gamemode + ")").ljust(7),
+                    (name + ":").ljust(longLen + 2),
+                    (str(len(players)) + "/" + svars["sv_maxclients"]).ljust(20), 
+                    svars["mapname"]))
 
     def cmd_help(self, issuedBy, data):
         """.help [command] - displays this message"""
@@ -226,6 +265,7 @@ class Pugbot(irc.bot.SingleServerIRCBot):
     def cmd_servers(self, issuedBy, data):
         """.servers - display server list"""
         self.reply("\x02Servers:\x02 " + ", ".join(self.servers))
+        self.reply("\x02TS3 Servers:\x02 " + ", ".join(self.ts3servers))
 
     def cmd_players(self, issuedBy, data):
         """.players [server] - show current players on the server"""
@@ -260,40 +300,60 @@ class Pugbot(irc.bot.SingleServerIRCBot):
         connection.connect(host, port)
         connection.use(vs_id)
 
-        people = []
-        people.append(connection.clients())
-        print(people)
+        people = connection.clients()
+        people = [p for p in people if not "Unknown" in p]
 
-        #self.reply("\x02{}\x02 clients on \x02{}\x02 TS3: {}".format(len(people), data), people[0])
+        self.reply("\x02{}\x02 clients on \x02{}\x02 TS3: {}".format(len(people), data, ", ".join(people)))
+
+    def cmd_info(self, issuedBy, data):
+        if not data:
+            return
+
+        data = data.split(" ")
+        info = self.serverHelper(data[0])
+
+        if None in info:
+            return
+
+        try:
+            self.reply("\x02{}\x02 connection info: /connect {}".format(info[0], info[1]))
+        except:
+            return
+
+    def a_cmd_s(self, issuedBy, data):
+        self.cmd_status(issuedBy, data)
+
+    def a_cmd_p(self, issuedBy, data):
+        self.cmd_players(issuedBy, data)
 
     def pw_cmd_login(self, issuedBy, data):
         """.login - logs you in"""
-        if issuedBy not in self.loggedin:
-            self.loggedin.append(issuedBy)
-            self.reply("{} has logged in".format(issuedBy))
+        if self.issuedBy not in self.loggedin:
+            self.loggedin.append(self.issuedBy)
+            self.reply("{} has logged in".format(self.issuedBy))
         else:
-            self.pm(issuedBy, "You are already logged in")
+            self.pm(self.issuedBy, "You are already logged in")
 
     def pw_cmd_die(self, issuedBy, data):
         """.die - kills the bot"""
-        if issuedBy in self.loggedin:
+        if self.issuedBy in self.loggedin:
             if data:
                 self.die("{}".format(data))
             else:
                 self.die("Leaving")
         else:
-            self.pm(issuedBy, "You don't have access to that command")
+            self.pm(self.issuedBy, "You don't have access to that command")
 
     def pw_cmd_rcon(self, issuedBy, data):
         """.rcon [server] [command] [args...] - send an rcon command to a server"""
-        if issuedBy in self.loggedin:
+        if self.issuedBy in self.loggedin:
             if data:
                 self.parseStatus(data, False, True)
             else:
                 for s in self.servers:
                     self.parseStatus(s, False, True)
         else:
-            self.pm(issuedBy, "You don't have access to that command")
+            self.pm(self.issuedBy, "You don't have access to that command")
 
 def main():
     try:
